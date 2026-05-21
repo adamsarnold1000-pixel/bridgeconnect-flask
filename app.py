@@ -42,7 +42,7 @@ def vip_signal():
     sl     = data.get("sl", "")
     tp     = data.get("tp", "")
     size   = data.get("size", "")
-   risk   = data.get("risk", "")
+    risk   = data.get("risk", "")
     msg = (f"🔔 *{symbol} {side}*\n"
            f"Entry: {entry}\n"
            f"SL: {sl}\n"
