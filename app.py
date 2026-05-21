@@ -5,7 +5,7 @@ import requests
 app = Flask(__name__)
 
 # VIP Telegram config
-VIP_BOT_TOKEN = "8851633323:AAEPBlRv20ZzfV4Tl0-doGusmscXkSzK9b0"
+VIP_BOT_TOKEN = "8851633323:AAEPBlRv2OZzfV4TlO-doGusmscXkSzK9b0"
 VIP_CHAT_ID   = "-1003686680670"
 
 client_signals = {}
