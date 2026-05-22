@@ -8,8 +8,8 @@ app = Flask(__name__)
 # ====================================================
 # VIP TELEGRAM CONFIG
 # ====================================================
-VIP_BOT_TOKEN = "YOUR_BOT_TOKEN"
-VIP_CHAT_ID   = "YOUR_CHAT_ID"
+VIP_BOT_TOKEN = "8851633323:AAEPBlRv2OZzfV4TlO-doGusmscXkSzK9b0"
+VIP_CHAT_ID   = "-1003686680670"
 
 # ====================================================
 # SIGNAL QUEUE STORAGE
@@ -21,10 +21,14 @@ client_signals = defaultdict(list)
 # ====================================================
 @app.route('/signal/<client_id>', methods=['POST'])
 def receive_signal(client_id):
+
     data = request.get_json()
 
     if not data:
-        return jsonify({"status": "error", "message": "No JSON received"}), 400
+        return jsonify({
+            "status": "error",
+            "message": "No JSON received"
+        }), 400
 
     # ADD SIGNAL TO QUEUE
     client_signals[client_id].append(data)
