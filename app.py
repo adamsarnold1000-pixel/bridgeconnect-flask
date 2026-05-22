@@ -3,7 +3,7 @@ from collections import defaultdict
 import json
 import requests
 
-app = Flask(__name__)
+app = Flask(__name__) 
 
 # ====================================================
 # VIP TELEGRAM CONFIG
