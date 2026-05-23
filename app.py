@@ -19,7 +19,9 @@ REG_CHAT_ID   = "-1003821837087"
 # SIGNAL QUEUE STORAGE
 # ====================================================
 client_signals = defaultdict(list)
-
+# ====================================================
+# VIP TELEGRAM ENDPOINT
+# ====================================================
 @app.route('/vip', methods=['POST'])
 def vip_signal():
 
@@ -87,45 +89,6 @@ def get_signal(client_id):
 
     return jsonify(signal), 200
 
-# ====================================================
-# VIP TELEGRAM ENDPOINT
-# ====================================================
-@app.route('/vip', methods=['POST'])
-def vip_signal():
-
-    data = request.get_json()
-
-    if not data:
-        return jsonify({"status": "error"}), 400
-
-    side   = data.get("side", "")
-    symbol = data.get("symbol", "BTCUSD")
-    entry  = data.get("entry", "")
-    sl     = data.get("sl", "")
-    tp     = data.get("tp", "")
-    size   = data.get("size", "")
-    risk   = data.get("risk", "")
-
-    msg = (
-        f"🔔 *{symbol} {side}*\n"
-        f"Entry: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP: {tp}\n"
-        f"Size: {size}"
-    )
-
-    requests.post(
-        f"https://api.telegram.org/bot{VIP_BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": VIP_CHAT_ID,
-            "text": msg,
-            "parse_mode": "Markdown"
-        }
-    )
-
-    print(f"[VIP SENT] {symbol} {side}")
-
-    return jsonify({"status": "ok"}), 200
 # ====================================================
 
 # ====================================================
