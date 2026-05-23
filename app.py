@@ -10,7 +10,11 @@ app = Flask(__name__)
 # ====================================================
 VIP_BOT_TOKEN = "8851633323:AAEPBlRv2OZzfV4TlO-doGusmscXkSzK9b0"
 VIP_CHAT_ID   = "-1003686680670"
-
+# ====================================================
+# REGULAR TELEGRAM CONFIG
+# ====================================================
+REG_BOT_TOKEN = "8765162338:AAHQ1sc7XEbn5xjf69vq95dMKyTnhbddphE"
+REG_CHAT_ID   = "-1003821837087"
 # ====================================================
 # SIGNAL QUEUE STORAGE
 # ====================================================
@@ -102,7 +106,41 @@ def vip_signal():
     print(f"[VIP SENT] {symbol} {side}")
 
     return jsonify({"status": "ok"}), 200
+# ====================================================
+# REGULAR TELEGRAM ENDPOINT
+# ====================================================
+@app.route('/regular', methods=['POST'])
+def regular_signal():
 
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"status": "error"}), 400
+
+    side   = data.get("side", "")
+    symbol = data.get("symbol", "BTCUSD")
+    entry  = data.get("entry", "")
+    sl     = data.get("sl", "")
+    tp     = data.get("tp", "")
+
+    msg = (
+        f"#{symbol} {side} "
+        f"Entry: {entry} "
+        f"SL: {sl} "
+        f"TP: {tp}"
+    )
+
+    requests.post(
+        f"https://api.telegram.org/bot{REG_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": REG_CHAT_ID,
+            "text": msg
+        }
+    )
+
+    print(f"[REGULAR SENT] {symbol} {side}")
+
+    return jsonify({"status": "ok"}), 200
 # ====================================================
 # HOME
 # ====================================================
