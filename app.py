@@ -67,7 +67,64 @@ def vip_signal():
     print(f"[VIP SENT] {msg}")
 
     return jsonify({"status": "ok"}), 200
+# ====================================================
+# RECEIVE SIGNAL
+# ====================================================
+@app.route('/signal/<client_id>', methods=['POST'])
+def receive_signal(client_id):
 
+    data = request.get_json()
+
+    if not data:
+        return jsonify({
+            "status": "error",
+            "message": "No JSON received"
+        }), 400
+
+    client_signals[client_id].append(data)
+
+    signal_type = data.get("type", "")
+
+    if signal_type == "close":
+        symbol = data.get("symbol", "BTCUSD")
+        result = data.get("result", "")
+        pnl    = data.get("pnl", "")
+
+        msg = f"{symbol} {result} {pnl}"
+
+    else:
+        side   = data.get("side", "")
+        symbol = data.get("symbol", "BTCUSD")
+        entry  = data.get("entry", "")
+        sl     = data.get("sl", "")
+        tp     = data.get("tp", "")
+        size   = data.get("size", "")
+
+        msg = (
+            f"🔔 {symbol} {side}\n"
+            f"Entry: {entry}\n"
+            f"SL: {sl}\n"
+            f"TP: {tp}\n"
+            f"Size: {size}"
+        )
+
+    requests.post(
+        f"https://api.telegram.org/bot{REG_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": REG_CHAT_ID,
+            "text": msg
+        }
+    )
+
+    print(f"[QUEUE ADD] Client={client_id}")
+    print(f"[REGULAR SENT] {msg}")
+    print(f"[SIGNAL] {data}")
+    print(f"[QUEUE SIZE] {len(client_signals[client_id])}")
+
+    return jsonify({
+        "status": "ok",
+        "queue_size": len(client_signals[client_id])
+    }), 200
 # ====================================================
 # SEND NEXT SIGNAL TO MT5
 # ====================================================
