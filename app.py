@@ -107,40 +107,7 @@ def vip_signal():
 
     return jsonify({"status": "ok"}), 200
 # ====================================================
-# REGULAR TELEGRAM ENDPOINT
-# ====================================================
-@app.route('/regular', methods=['POST'])
-def regular_signal():
 
-    data = request.get_json()
-
-    if not data:
-        return jsonify({"status": "error"}), 400
-
-    side   = data.get("side", "")
-    symbol = data.get("symbol", "BTCUSD")
-    entry  = data.get("entry", "")
-    sl     = data.get("sl", "")
-    tp     = data.get("tp", "")
-
-    msg = (
-        f"#{symbol} {side} "
-        f"Entry: {entry} "
-        f"SL: {sl} "
-        f"TP: {tp}"
-    )
-
-    requests.post(
-        f"https://api.telegram.org/bot{REG_BOT_TOKEN}/sendMessage",
-        json={
-            "chat_id": REG_CHAT_ID,
-            "text": msg
-        }
-    )
-
-    print(f"[REGULAR SENT] {symbol} {side}")
-
-    return jsonify({"status": "ok"}), 200
 # ====================================================
 # HOME
 # ====================================================
