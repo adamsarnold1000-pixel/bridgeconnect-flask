@@ -34,10 +34,49 @@ def receive_signal(client_id):
             "message": "No JSON received"
         }), 400
 
-    # ADD SIGNAL TO QUEUE
+    # ADD SIGNAL TO QUEUE FOR MT5
     client_signals[client_id].append(data)
 
+    signal_type = data.get("type", "")
+
+    # CLOSE ALERT
+    if signal_type == "close":
+
+        symbol = data.get("symbol", "BTCUSD")
+        result = data.get("result", "")
+        pnl    = data.get("pnl", "")
+
+        msg = f"{symbol} {result} {pnl}"
+
+    # ENTRY ALERT
+    else:
+
+        side   = data.get("side", "")
+        symbol = data.get("symbol", "BTCUSD")
+        entry  = data.get("entry", "")
+        sl     = data.get("sl", "")
+        tp     = data.get("tp", "")
+        size   = data.get("size", "")
+
+        msg = (
+            f"🔔 {symbol} {side}\n"
+            f"Entry: {entry}\n"
+            f"SL: {sl}\n"
+            f"TP: {tp}\n"
+            f"Size: {size}"
+        )
+
+    # SEND TO REGULAR TELEGRAM
+    requests.post(
+        f"https://api.telegram.org/bot{REG_BOT_TOKEN}/sendMessage",
+        json={
+            "chat_id": REG_CHAT_ID,
+            "text": msg
+        }
+    )
+
     print(f"[QUEUE ADD] Client={client_id}")
+    print(f"[REGULAR SENT] {msg}")
     print(f"[SIGNAL] {data}")
     print(f"[QUEUE SIZE] {len(client_signals[client_id])}")
 
