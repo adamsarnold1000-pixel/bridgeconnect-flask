@@ -81,9 +81,10 @@ def receive_signal(client_id):
             "message": "No JSON received"
         }), 400
 
-    client_signals[client_id].append(data)
-
     signal_type = data.get("type", "")
+
+    if signal_type != "close":
+    client_signals[client_id].append(data)
 
     if signal_type == "close":
         symbol = data.get("symbol", "BTCUSD")
