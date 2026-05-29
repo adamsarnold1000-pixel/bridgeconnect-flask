@@ -1,24 +1,26 @@
 from flask import Flask, request, jsonify
 from collections import defaultdict
-import json
 import requests
 
-app = Flask(__name__) 
+app = Flask(__name__)
 
 # ====================================================
 # VIP TELEGRAM CONFIG
 # ====================================================
 VIP_BOT_TOKEN = "8851633323:AAEPBlRv2OZzfV4TlO-doGusmscXkSzK9b0"
 VIP_CHAT_ID   = "-1003686680670"
+
 # ====================================================
 # REGULAR TELEGRAM CONFIG
 # ====================================================
 REG_BOT_TOKEN = "8765162338:AAHQ1sc7XEbn5xjf69vq95dMKyTnhbddphE"
 REG_CHAT_ID   = "-1003821837087"
+
 # ====================================================
 # SIGNAL QUEUE STORAGE
 # ====================================================
 client_signals = defaultdict(list)
+
 # ====================================================
 # VIP TELEGRAM ENDPOINT
 # ====================================================
@@ -28,7 +30,7 @@ def vip_signal():
     data = request.get_json()
 
     if not data:
-        return jsonify({"status": "error"}), 400
+        return jsonify({"status": "error", "message": "No JSON received"}), 400
 
     signal_type = data.get("type", "")
 
@@ -65,8 +67,9 @@ def vip_signal():
     )
 
     print(f"[VIP SENT] {msg}")
-
     return jsonify({"status": "ok"}), 200
+
+
 # ====================================================
 # RECEIVE SIGNAL
 # ====================================================
@@ -81,10 +84,9 @@ def receive_signal(client_id):
             "message": "No JSON received"
         }), 400
 
-    client_signals[client_id].append(data)
-
     signal_type = data.get("type", "")
 
+    # CLOSE ALERTS: TELEGRAM ONLY, DO NOT SEND TO MT5 QUEUE
     if signal_type == "close":
         symbol = data.get("symbol", "BTCUSD")
         result = data.get("result", "")
@@ -92,13 +94,23 @@ def receive_signal(client_id):
 
         msg = f"{symbol} {result} {pnl}"
 
+    # ENTRY ALERTS: TELEGRAM + MT5 QUEUE
     else:
         side   = data.get("side", "")
-        symbol = data.get("symbol", "BTCUSD")
+        symbol = data.get("symbol", "")
         entry  = data.get("entry", "")
         sl     = data.get("sl", "")
         tp     = data.get("tp", "")
         size   = data.get("size", "")
+
+        if not side or not symbol:
+            return jsonify({
+                "status": "error",
+                "message": "missing side or symbol",
+                "received": data
+            }), 400
+
+        client_signals[client_id].append(data)
 
         msg = (
             f"🔔 {symbol} {side}\n"
@@ -116,7 +128,6 @@ def receive_signal(client_id):
         }
     )
 
-    print(f"[QUEUE ADD] Client={client_id}")
     print(f"[REGULAR SENT] {msg}")
     print(f"[SIGNAL] {data}")
     print(f"[QUEUE SIZE] {len(client_signals[client_id])}")
@@ -125,6 +136,8 @@ def receive_signal(client_id):
         "status": "ok",
         "queue_size": len(client_signals[client_id])
     }), 200
+
+
 # ====================================================
 # SEND NEXT SIGNAL TO MT5
 # ====================================================
@@ -133,11 +146,9 @@ def get_signal(client_id):
 
     queue = client_signals.get(client_id, [])
 
-    # EMPTY QUEUE
     if len(queue) == 0:
         return jsonify({}), 200
 
-    # GET FIRST SIGNAL
     signal = queue.pop(0)
 
     print(f"[QUEUE SERVE] Client={client_id}")
@@ -146,7 +157,6 @@ def get_signal(client_id):
 
     return jsonify(signal), 200
 
-# ====================================================
 
 # ====================================================
 # HOME
@@ -154,6 +164,7 @@ def get_signal(client_id):
 @app.route('/', methods=['GET'])
 def home():
     return "BridgeConnect Queue Flask Running", 200
+
 
 # ====================================================
 # RUN APP
