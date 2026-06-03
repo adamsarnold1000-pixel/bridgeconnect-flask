@@ -1,140 +1,244 @@
-from flask import Flask, request, jsonify
-from collections import defaultdict
+"""
+Empire Signals - Telegram-only signal relay.
+
+Decoupled from execution: this service ONLY formats TradingView alerts and
+posts them to Telegram. It does NOT place trades and has no MT5 queue, so it
+can never interfere with the copier / execution path.
+
+Endpoints:
+  POST /vip          -> posts to the VIP channel
+  POST /regular      -> posts to the REGULAR (free) channel
+  POST /signal/<id>  -> backward-compatible alias -> REGULAR channel
+  GET  /             -> health text
+  GET  /health       -> JSON health + how many open trades are being tracked
+
+Secrets are read from environment variables (set these in Railway -> Variables):
+  VIP_BOT_TOKEN, VIP_CHAT_ID, REG_BOT_TOKEN, REG_CHAT_ID
+Optional:
+  RESULT_MODE = "pct" (default) | "pips" | "points"
+  DRY_RUN     = "1" to log instead of calling Telegram (for local testing)
+"""
+
+import json
+import os
+import threading
+
 import requests
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# ====================================================
-# VIP TELEGRAM CONFIG
-# ====================================================
-VIP_BOT_TOKEN = "8851633323:AAEPBlRv2OZzfV4TlO-doGusmscXkSzK9b0"
-VIP_CHAT_ID   = "-1003686680670"
+# ----------------------------------------------------------------------------
+# Config (from environment - never hardcode tokens)
+# ----------------------------------------------------------------------------
+CHANNELS = {
+    "vip": {
+        "token": os.environ.get("VIP_BOT_TOKEN", ""),
+        "chat_id": os.environ.get("VIP_CHAT_ID", ""),
+    },
+    "regular": {
+        "token": os.environ.get("REG_BOT_TOKEN", ""),
+        "chat_id": os.environ.get("REG_CHAT_ID", ""),
+    },
+}
 
-# ====================================================
-# REGULAR TELEGRAM CONFIG
-# ====================================================
-REG_BOT_TOKEN = "8765162338:AAHQ1sc7XEbn5xjf69vq95dMKyTnhbddphE"
-REG_CHAT_ID   = "-1003821837087"
+RESULT_MODE = os.environ.get("RESULT_MODE", "pct").lower()   # pct | pips | points
+DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "True")
 
-# ====================================================
-# SIGNAL QUEUE STORAGE
-# ====================================================
-client_signals = defaultdict(list)
+# In-memory store of open trades so we can compute WIN/LOSS on close.
+# Keyed by (channel, symbol). Note: if the service restarts between an entry
+# and its close, that trade's result can't be computed (we post "CLOSED").
+_OPEN = {}
+_LOCK = threading.Lock()
 
-# ====================================================
-# BUILD TELEGRAM MESSAGE
-# ====================================================
-def build_msg(data):
-    signal_type = data.get("type", "")
 
-    if signal_type == "close":
-        symbol = data.get("symbol", "BTCUSD")
-        result = data.get("result", "")
-        pnl    = data.get("pnl", "")
-        return f"{symbol} {result} {pnl}"
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+def _fmt(num):
+    """Format a price/number cleanly (drop trailing zeros, max 5 dp)."""
+    try:
+        f = float(num)
+    except (TypeError, ValueError):
+        return str(num)
+    s = f"{f:.5f}".rstrip("0").rstrip(".")
+    return s if s else "0"
 
-    side   = data.get("side", "")
-    symbol = data.get("symbol", "BTCUSD")
-    entry  = data.get("entry", "")
-    sl     = data.get("sl", "")
-    tp     = data.get("tp", "")
-    size   = data.get("size", "")
 
-    return (
-        f"🔔 *{symbol} {side}*\n"
-        f"Entry: {entry}\n"
-        f"SL: {sl}\n"
-        f"TP: {tp}\n"
-        f"Size: {size}"
-    )
+def _to_float(val):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
-# ====================================================
-# SEND TELEGRAM
-# ====================================================
-def send_telegram(bot_token, chat_id, msg, label):
+
+def _extract(data):
+    """Normalize a TradingView payload into a common dict.
+
+    Supports two shapes:
+      1) Wrapped (recommended):
+         {"symbol","action","price","contracts","order_id","pine":{...}}
+      2) Raw pine alert_message only:
+         {"event","side","ticker","sl","tp"}
+    """
+    pine = data.get("pine")
+    if not isinstance(pine, dict):
+        # raw shape - the whole payload IS the pine message
+        pine = data
+
+    event = (pine.get("event") or "").lower()
+    order_id = (data.get("order_id") or "").lower()
+    # Fall back to order_id to detect a close ("Exit Long"/"Exit Short").
+    if not event:
+        event = "close" if "exit" in order_id else "entry"
+
+    side = (pine.get("side") or "").lower()
+    if not side:
+        action = (data.get("action") or "").lower()
+        side = "long" if action == "buy" else "short" if action == "sell" else ""
+
+    symbol = data.get("symbol") or pine.get("ticker") or "?"
+
+    return {
+        "event": event,
+        "side": side,
+        "symbol": symbol,
+        "price": _to_float(data.get("price")),
+        "contracts": data.get("contracts"),
+        "sl": pine.get("sl"),
+        "tp": pine.get("tp"),
+    }
+
+
+def _result_text(side, entry, exit_price):
+    """Return (emoji_word, detail_string) for a closed trade."""
+    if entry is None or exit_price is None:
+        return ("CLOSED", "")
+    move = (exit_price - entry) if side == "long" else (entry - exit_price)
+    win = move >= 0
+    word = "✅ WIN" if win else "❌ LOSS"
+    sign = "+" if move >= 0 else "-"
+    amove = abs(move)
+
+    if RESULT_MODE == "pct" and entry:
+        pct = move / entry * 100.0
+        psign = "+" if pct >= 0 else "-"
+        return (word, f"{psign}{abs(pct):.2f}%")
+    if RESULT_MODE == "pips":
+        # crude pip size: FX 5-dec -> 0.0001; everything else -> 1 point
+        pip = 0.0001 if entry < 10 else 1.0
+        return (word, f"{sign}{amove / pip:.0f} pips")
+    # points (raw price move)
+    return (word, f"{sign}{_fmt(amove)}")
+
+
+def build_message(data, channel):
+    """Build the Telegram text and update open-trade state. Returns str."""
+    s = _extract(data)
+    symbol, side, event = s["symbol"], s["side"], s["event"]
+    key = (channel, symbol)
+
+    if event == "close":
+        with _LOCK:
+            rec = _OPEN.pop(key, None)
+        entry = rec["entry"] if rec else None
+        rside = rec["side"] if rec else side
+        word, detail = _result_text(rside, entry, s["price"])
+        tail = f" {detail}" if detail else ""
+        return f"{symbol} {word}{tail}"
+
+    # entry
+    if s["price"] is not None:
+        with _LOCK:
+            _OPEN[key] = {"side": side, "entry": s["price"]}
+
+    side_lbl = side.upper() if side else "?"
+    lines = [f"🔔 *{symbol} {side_lbl}*"]
+    if s["price"] is not None:
+        lines.append(f"Entry: {_fmt(s['price'])}")
+    if s["sl"] not in (None, ""):
+        lines.append(f"SL: {_fmt(s['sl'])}")
+    if s["tp"] not in (None, ""):
+        lines.append(f"TP: {_fmt(s['tp'])}")
+    if s["contracts"] not in (None, ""):
+        lines.append(f"Size: {_fmt(s['contracts'])}")
+    return "\n".join(lines)
+
+
+def send_telegram(channel, msg):
+    cfg = CHANNELS.get(channel, {})
+    token, chat_id = cfg.get("token"), cfg.get("chat_id")
+    if DRY_RUN:
+        print(f"[DRY_RUN {channel}] -> {chat_id}\n{msg}")
+        return 200, "dry_run"
+    if not token or not chat_id:
+        print(f"[CONFIG ERROR] missing token/chat_id for '{channel}'")
+        return 500, "missing config"
     r = requests.post(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": msg,
-            "parse_mode": "Markdown"
-        }
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+        timeout=10,
     )
+    print(f"[{channel.upper()} SENT] {msg!r} -> {r.status_code} {r.text}")
+    return r.status_code, r.text
 
-    print(f"[{label} SENT] {msg}")
-    print(f"[{label} TELEGRAM RESPONSE] {r.status_code} {r.text}")
 
-# ====================================================
-# VIP TELEGRAM ENDPOINT
-# ====================================================
-@app.route('/vip', methods=['POST'])
-def vip_signal():
-    data = request.get_json()
-
+def _handle(channel):
+    data = request.get_json(silent=True)
     if not data:
-        return jsonify({"status": "error"}), 400
+        return jsonify({"status": "error", "message": "no JSON"}), 400
+    try:
+        msg = build_message(data, channel)
+        code, _ = send_telegram(channel, msg)
+        ok = 200 <= code < 300
+        return jsonify({"status": "ok" if ok else "telegram_error", "sent": msg}), (
+            200 if ok else 502
+        )
+    except Exception as exc:  # never 500 silently - log it
+        print(f"[ERROR] {exc} | payload={json.dumps(data)[:500]}")
+        return jsonify({"status": "error", "message": str(exc)}), 400
 
-    msg = build_msg(data)
 
-    send_telegram(VIP_BOT_TOKEN, VIP_CHAT_ID, msg, "VIP")
+# ----------------------------------------------------------------------------
+# Routes
+# ----------------------------------------------------------------------------
+@app.route("/vip", methods=["POST"])
+def vip():
+    return _handle("vip")
 
-    return jsonify({"status": "ok"}), 200
 
-# ====================================================
-# RECEIVE REGULAR SIGNAL
-# ====================================================
-@app.route('/signal/<client_id>', methods=['POST'])
-def receive_signal(client_id):
-    data = request.get_json()
+@app.route("/regular", methods=["POST"])
+def regular():
+    return _handle("regular")
 
-    if not data:
-        return jsonify({
-            "status": "error",
-            "message": "No JSON received"
-        }), 400
 
-    client_signals[client_id].append(data)
+@app.route("/signal/<client_id>", methods=["POST"])
+def signal_alias(client_id):
+    # backward-compatible: old per-client endpoint now just posts to regular
+    return _handle("regular")
 
-    msg = build_msg(data)
 
-    send_telegram(REG_BOT_TOKEN, REG_CHAT_ID, msg, "REGULAR")
-
-    print(f"[QUEUE ADD] Client={client_id}")
-    print(f"[SIGNAL] {data}")
-    print(f"[QUEUE SIZE] {len(client_signals[client_id])}")
-
-    return jsonify({
-        "status": "ok",
-        "queue_size": len(client_signals[client_id])
-    }), 200
-
-# ====================================================
-# SEND NEXT SIGNAL TO MT5
-# ====================================================
-@app.route('/signal/<client_id>', methods=['GET'])
-def get_signal(client_id):
-    queue = client_signals.get(client_id, [])
-
-    if len(queue) == 0:
-        return jsonify({}), 200
-
-    signal = queue.pop(0)
-
-    print(f"[QUEUE SERVE] Client={client_id}")
-    print(f"[SERVED SIGNAL] {signal}")
-    print(f"[QUEUE REMAINING] {len(queue)}")
-
-    return jsonify(signal), 200
-
-# ====================================================
-# HOME
-# ====================================================
-@app.route('/', methods=['GET'])
+@app.route("/", methods=["GET"])
 def home():
-    return "BridgeConnect Queue Flask Running", 200
+    return "Empire Signals relay running", 200
 
-# ====================================================
-# RUN APP
-# ====================================================
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify(
+        {
+            "status": "ok",
+            "result_mode": RESULT_MODE,
+            "dry_run": DRY_RUN,
+            "open_trades": len(_OPEN),
+            "channels_configured": {
+                c: bool(v.get("token") and v.get("chat_id"))
+                for c, v in CHANNELS.items()
+            },
+        }
+    ), 200
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
