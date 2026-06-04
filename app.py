@@ -15,8 +15,9 @@ Endpoints:
 Secrets are read from environment variables (set these in Railway -> Variables):
   VIP_BOT_TOKEN, VIP_CHAT_ID, REG_BOT_TOKEN, REG_CHAT_ID
 Optional:
-  RESULT_MODE = "pct" (default) | "pips" | "points"
-  DRY_RUN     = "1" to log instead of calling Telegram (for local testing)
+  DRY_RUN = "1" to log instead of calling Telegram (for local testing)
+
+Result format: raw dollar P&L (move * contracts), e.g. WIN +$73.45
 """
 
 import json
@@ -42,7 +43,6 @@ CHANNELS = {
     },
 }
 
-RESULT_MODE = os.environ.get("RESULT_MODE", "pct").lower()   # pct | pips | points
 DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "True")
 
 # In-memory store of open trades so we can compute WIN/LOSS on close.
@@ -83,12 +83,10 @@ def _extract(data):
     """
     pine = data.get("pine")
     if not isinstance(pine, dict):
-        # raw shape - the whole payload IS the pine message
         pine = data
 
     event = (pine.get("event") or "").lower()
     order_id = (data.get("order_id") or "").lower()
-    # Fall back to order_id to detect a close ("Exit Long"/"Exit Short").
     if not event:
         event = "close" if "exit" in order_id else "entry"
 
@@ -104,32 +102,22 @@ def _extract(data):
         "side": side,
         "symbol": symbol,
         "price": _to_float(data.get("price")),
-        "contracts": data.get("contracts"),
+        "contracts": _to_float(data.get("contracts")),
         "sl": pine.get("sl"),
         "tp": pine.get("tp"),
     }
 
 
-def _result_text(side, entry, exit_price):
-    """Return (emoji_word, detail_string) for a closed trade."""
+def _result_text(side, entry, exit_price, contracts=1.0):
+    """Return (emoji_word, detail_string) for a closed trade — raw dollar P&L."""
     if entry is None or exit_price is None:
         return ("CLOSED", "")
     move = (exit_price - entry) if side == "long" else (entry - exit_price)
     win = move >= 0
     word = "✅ WIN" if win else "❌ LOSS"
     sign = "+" if move >= 0 else "-"
-    amove = abs(move)
-
-    if RESULT_MODE == "pct" and entry:
-        pct = move / entry * 100.0
-        psign = "+" if pct >= 0 else "-"
-        return (word, f"{psign}{abs(pct):.2f}%")
-    if RESULT_MODE == "pips":
-        # crude pip size: FX 5-dec -> 0.0001; everything else -> 1 point
-        pip = 0.0001 if entry < 10 else 1.0
-        return (word, f"{sign}{amove / pip:.0f} pips")
-    # points (raw price move)
-    return (word, f"{sign}{_fmt(amove)}")
+    dollar = abs(move) * (contracts if contracts else 1.0)
+    return (word, f"{sign}${dollar:,.2f}")
 
 
 def build_message(data, channel):
@@ -143,14 +131,19 @@ def build_message(data, channel):
             rec = _OPEN.pop(key, None)
         entry = rec["entry"] if rec else None
         rside = rec["side"] if rec else side
-        word, detail = _result_text(rside, entry, s["price"])
+        contracts = rec.get("contracts", 1.0) if rec else 1.0
+        word, detail = _result_text(rside, entry, s["price"], contracts)
         tail = f" {detail}" if detail else ""
         return f"{symbol} {word}{tail}"
 
-    # entry
+    # entry — store side, entry price, and contracts for later close calc
     if s["price"] is not None:
         with _LOCK:
-            _OPEN[key] = {"side": side, "entry": s["price"]}
+            _OPEN[key] = {
+                "side": side,
+                "entry": s["price"],
+                "contracts": s["contracts"] or 1.0,
+            }
 
     side_lbl = side.upper() if side else "?"
     lines = [f"🔔 *{symbol} {side_lbl}*"]
@@ -194,7 +187,7 @@ def _handle(channel):
         return jsonify({"status": "ok" if ok else "telegram_error", "sent": msg}), (
             200 if ok else 502
         )
-    except Exception as exc:  # never 500 silently - log it
+    except Exception as exc:
         print(f"[ERROR] {exc} | payload={json.dumps(data)[:500]}")
         return jsonify({"status": "error", "message": str(exc)}), 400
 
@@ -214,7 +207,6 @@ def regular():
 
 @app.route("/signal/<client_id>", methods=["POST"])
 def signal_alias(client_id):
-    # backward-compatible: old per-client endpoint now just posts to regular
     return _handle("regular")
 
 
@@ -228,7 +220,7 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "result_mode": RESULT_MODE,
+            "result_mode": "dollar",
             "dry_run": DRY_RUN,
             "open_trades": len(_OPEN),
             "channels_configured": {
