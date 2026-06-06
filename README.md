@@ -24,8 +24,7 @@ MT5 EA  (mt5/TV_Copier.mq5)
 | File | What it does |
 |------|--------------|
 | `pine/btc_5m.pine` | TradingView strategy. Fires JSON alerts with `event`, `side`, `ticker`, `sl`, `tp`, `size`. |
-| `app.py` | Flask bridge. Ingests alerts, queues trades, serves the EA, hosts the control panel. |
-| `templates/panel.html` | Control panel web UI. |
+| `app.py` | Flask bridge. Ingests alerts, queues trades, serves the EA, and hosts the control panel UI (embedded in the file — no `templates/` folder needed). |
 | `mt5/TV_Copier.mq5` | MetaTrader 5 Expert Advisor. Polls the bridge and executes trades. |
 
 ## How the lot size stays in sync

@@ -8,7 +8,7 @@ import os
 import time
 import threading
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
@@ -328,6 +328,336 @@ def position_closed():
 # CONTROL PANEL
 # ============================================================
 
+# Control panel HTML is embedded here so the whole server is a single
+# self-contained app.py (no templates/ folder needed for deployment).
+PANEL_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TV &rarr; MT5 Bridge Control Panel</title>
+<style>
+  :root {
+    --bg: #0f1419; --bg2: #1a1f2e; --bg3: #252b3b;
+    --text: #e0e6ed; --muted: #8899a6; --green: #17bf63;
+    --red: #e0245e; --blue: #1da1f2; --orange: #ffad1f;
+    --border: #38444d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+         background: var(--bg); color: var(--text); padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 4px; }
+  h2 { font-size: 1.1em; margin-bottom: 10px; color: var(--blue); }
+  .subtitle { color: var(--muted); font-size: 0.85em; margin-bottom: 20px; }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card-full { grid-column: 1 / -1; }
+
+  /* Status dots */
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .dot-orange { background: var(--orange); }
+
+  /* Accounts table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+
+  /* Webhook URL */
+  .url-box { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+             padding: 10px 14px; font-family: monospace; font-size: 0.9em; word-break: break-all;
+             display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .url-box button { margin-left: 10px; flex-shrink: 0; }
+
+  /* Buttons */
+  .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;
+         font-size: 0.85em; font-weight: 600; color: #fff; }
+  .btn-green { background: var(--green); }
+  .btn-red { background: var(--red); }
+  .btn-blue { background: var(--blue); }
+  .btn-orange { background: var(--orange); color: #000; }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+
+  /* Test form */
+  .test-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; margin-top: 10px; }
+  .test-form label { font-size: 0.8em; color: var(--muted); display: block; }
+  .test-form input { background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+                     padding: 6px 8px; border-radius: 4px; width: 110px; font-size: 0.85em; }
+
+  /* Log entries */
+  .log-entry { font-size: 0.8em; padding: 4px 0; border-bottom: 1px solid var(--border);
+               font-family: monospace; word-break: break-word; }
+  .log-time { color: var(--muted); }
+  .log-event { color: var(--blue); font-weight: 600; }
+  .log-event-err { color: var(--red); }
+  .log-scroll { max-height: 350px; overflow-y: auto; }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3);
+           border: 1px solid var(--green); color: var(--green); padding: 10px 18px;
+           border-radius: 6px; font-size: 0.85em; display: none; z-index: 999; }
+  .toast.error { border-color: var(--red); color: var(--red); }
+
+  .status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75em;
+                  font-weight: 600; }
+  .badge-ok { background: rgba(23,191,99,0.2); color: var(--green); }
+  .badge-fail { background: rgba(224,36,94,0.2); color: var(--red); }
+  .badge-pending { background: rgba(255,173,31,0.2); color: var(--orange); }
+</style>
+</head>
+<body>
+
+<h1>TV &rarr; MT5 Bridge</h1>
+<p class="subtitle">Control Panel &middot; Server time: <span id="serverTime">{{ server_time }}</span></p>
+
+<div class="grid">
+
+  <!-- WEBHOOK URL -->
+  <div class="card">
+    <h2>Webhook URL</h2>
+    <p style="font-size:0.8em;color:var(--muted);margin-bottom:6px;">
+      Paste into TradingView alert &rarr; Webhook URL. Message: <code>{% raw %}{{strategy.order.alert_message}}{% endraw %}</code>
+    </p>
+    <div class="url-box">
+      <span id="webhookUrl">Loading...</span>
+      <button class="btn btn-blue" onclick="copyUrl()">Copy</button>
+    </div>
+  </div>
+
+  <!-- MT5 ACCOUNTS -->
+  <div class="card">
+    <h2>MT5 Accounts</h2>
+    <div id="accountsTable">
+      <table>
+        <thead><tr><th>Status</th><th>Account</th><th>Server</th><th>Balance</th><th>Type</th><th>Last Ping</th></tr></thead>
+        <tbody id="accountsBody">
+          {% if accounts %}
+            {% for acc in accounts %}
+            <tr>
+              <td><span class="dot {{ 'dot-green' if acc.online else 'dot-red' }}"></span></td>
+              <td>{{ acc.account_id }}</td>
+              <td>{{ acc.server }}</td>
+              <td>${{ "%.2f"|format(acc.balance) }}</td>
+              <td>{{ acc.type }}</td>
+              <td>{{ acc.ping_age_s }}s ago</td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="6" style="color:var(--muted)">No MT5 accounts connected yet</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- TEST CONTROLS -->
+  <div class="card card-full">
+    <h2>Connection Test</h2>
+    <p style="font-size:0.8em;color:var(--muted);margin-bottom:6px;">
+      Send test signals to verify the EA receives and executes them.
+    </p>
+    <div class="test-form">
+      <div>
+        <label>Symbol</label>
+        <input id="testSymbol" value="BTCUSD" />
+      </div>
+      <div>
+        <label>Side</label>
+        <select id="testSide" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:4px;font-size:0.85em;">
+          <option value="BUY">BUY (Long)</option>
+          <option value="SELL">SELL (Short)</option>
+        </select>
+      </div>
+      <div>
+        <label>SL</label>
+        <input id="testSL" value="0" type="number" step="0.01" />
+      </div>
+      <div>
+        <label>TP</label>
+        <input id="testTP" value="0" type="number" step="0.01" />
+      </div>
+      <div>
+        <label>Lot Size</label>
+        <input id="testSize" value="0.01" type="number" step="0.01" />
+      </div>
+      <button class="btn btn-green" onclick="sendTestEntry()">Send Test Entry</button>
+      <button class="btn btn-red" onclick="sendTestClose()">Send Test Close</button>
+    </div>
+  </div>
+
+  <!-- PENDING QUEUE -->
+  <div class="card">
+    <h2>Pending Queue</h2>
+    <div id="queueInfo">
+      {% if queue_counts %}
+        {% for k, v in queue_counts.items() %}
+          <p>{{ k }}: <strong>{{ v }}</strong> pending</p>
+        {% endfor %}
+      {% else %}
+        <p style="color:var(--muted)">Queue empty</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- TRADE HISTORY -->
+  <div class="card">
+    <h2>Trade History</h2>
+    <div class="log-scroll" id="historyLog">
+      {% for h in history[:20] %}
+      <div class="log-entry">
+        <span class="log-time">{{ h.confirmed_at or h.time or '' }}</span>
+        <span class="status-badge {{ 'badge-ok' if h.status == 'executed' else 'badge-fail' if h.status == 'failed' else 'badge-pending' }}">
+          {{ h.status or h.event or '?' }}
+        </span>
+        Trade #{{ h.trade_id }} &middot; ticket={{ h.ticket_id or '-' }} &middot; P&L={{ h.profit or 0 }}
+        {% if h.error_message %}<br><span style="color:var(--red)">{{ h.error_message }}</span>{% endif %}
+      </div>
+      {% endfor %}
+      {% if not history %}
+        <p style="color:var(--muted)">No trades confirmed yet</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- SIGNAL LOG -->
+  <div class="card card-full">
+    <h2>Signal Log</h2>
+    <div class="log-scroll" id="signalLog">
+      {% for log in logs %}
+      <div class="log-entry">
+        <span class="log-time">{{ log.time }}</span>
+        <span class="log-event">{{ log.event }}</span>
+        {{ log.data }}
+      </div>
+      {% endfor %}
+      {% if not logs %}
+        <p style="color:var(--muted)">No signals received yet</p>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// Auto-detect webhook URL
+const loc = window.location;
+const baseUrl = loc.protocol + '//' + loc.host;
+document.getElementById('webhookUrl').textContent = baseUrl + '/webhook';
+
+function copyUrl() {
+  navigator.clipboard.writeText(baseUrl + '/webhook').then(() => showToast('Webhook URL copied!'));
+}
+
+function showToast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast' + (isError ? ' error' : '');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+async function sendTestEntry() {
+  const body = {
+    symbol: document.getElementById('testSymbol').value,
+    side: document.getElementById('testSide').value,
+    sl: parseFloat(document.getElementById('testSL').value) || 0,
+    tp: parseFloat(document.getElementById('testTP').value) || 0,
+    size: parseFloat(document.getElementById('testSize').value) || 0.01,
+  };
+  try {
+    const r = await fetch('/api/test/entry', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    showToast('Test entry queued: ' + d.trade.action + ' ' + d.trade.symbol + ' (ID=' + d.trade.id + ')');
+    refreshStatus();
+  } catch(e) { showToast('Error: ' + e.message, true); }
+}
+
+async function sendTestClose() {
+  const body = { symbol: document.getElementById('testSymbol').value };
+  try {
+    const r = await fetch('/api/test/close', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    showToast('Test CLOSE queued for ' + body.symbol + ' (ID=' + d.trade.id + ')');
+    refreshStatus();
+  } catch(e) { showToast('Error: ' + e.message, true); }
+}
+
+// Auto-refresh status every 3 seconds
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    document.getElementById('serverTime').textContent = d.server_time;
+
+    // Accounts
+    let html = '';
+    if (d.accounts.length === 0) {
+      html = '<tr><td colspan="6" style="color:var(--muted)">No MT5 accounts connected yet</td></tr>';
+    } else {
+      d.accounts.forEach(a => {
+        html += `<tr>
+          <td><span class="dot ${a.online ? 'dot-green' : 'dot-red'}"></span></td>
+          <td>${a.account_id}</td><td>${a.server}</td>
+          <td>$${Number(a.balance).toFixed(2)}</td><td>${a.type}</td>
+          <td>${a.ping_age_s}s ago</td></tr>`;
+      });
+    }
+    document.getElementById('accountsBody').innerHTML = html;
+
+    // Queue
+    let qHtml = '';
+    const qc = d.queue_counts;
+    if (Object.keys(qc).length === 0) {
+      qHtml = '<p style="color:var(--muted)">Queue empty</p>';
+    } else {
+      for (const [k,v] of Object.entries(qc)) {
+        qHtml += `<p>${k}: <strong>${v}</strong> pending</p>`;
+      }
+    }
+    document.getElementById('queueInfo').innerHTML = qHtml;
+
+    // History
+    let hHtml = '';
+    d.history.forEach(h => {
+      const cls = h.status === 'executed' ? 'badge-ok' : h.status === 'failed' ? 'badge-fail' : 'badge-pending';
+      hHtml += `<div class="log-entry">
+        <span class="log-time">${h.confirmed_at || h.time || ''}</span>
+        <span class="status-badge ${cls}">${h.status || h.event || '?'}</span>
+        Trade #${h.trade_id} &middot; ticket=${h.ticket_id || '-'} &middot; P&amp;L=${h.profit || 0}
+        ${h.error_message ? '<br><span style="color:var(--red)">' + h.error_message + '</span>' : ''}
+      </div>`;
+    });
+    document.getElementById('historyLog').innerHTML = hHtml || '<p style="color:var(--muted)">No trades confirmed yet</p>';
+
+    // Logs
+    let lHtml = '';
+    d.logs.forEach(l => {
+      lHtml += `<div class="log-entry">
+        <span class="log-time">${l.time}</span>
+        <span class="log-event">${l.event}</span>
+        ${typeof l.data === 'object' ? JSON.stringify(l.data) : l.data}
+      </div>`;
+    });
+    document.getElementById('signalLog').innerHTML = lHtml || '<p style="color:var(--muted)">No signals received yet</p>';
+
+  } catch(e) { /* silent */ }
+}
+
+setInterval(refreshStatus, 3000);
+</script>
+
+</body>
+</html>"""
+
+
 @app.route("/", methods=["GET"])
 def control_panel():
     """Render the web control panel."""
@@ -351,8 +681,8 @@ def control_panel():
     with pending_lock:
         queue_counts = {k: len(v) for k, v in pending_trades.items() if v}
 
-    return render_template(
-        "panel.html",
+    return render_template_string(
+        PANEL_HTML,
         accounts=accounts,
         logs=logs,
         history=history,
