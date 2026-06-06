@@ -1,0 +1,108 @@
+//@version=5
+strategy("BTC 5m", overlay=true, initial_capital=5000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=false)
+
+//====================================================
+// 1) MASTER INPUTS
+//====================================================
+grpTrade   = "TRADE SETTINGS"
+tf_trend   = input.timeframe("180", "Trend Filter Timeframe", group=grpTrade)
+rr_target  = input.float(.6, "Risk:Reward Ratio", step=0.1, group=grpTrade)
+max_risk   = input.float(150, "Max Risk $", step=10, group=grpTrade)
+point_val  = input.float(1.0, "Dollar Value Per Point", step=0.1, group=grpTrade)
+
+grpImpulse = "EMPIRE IMPULSE (STRAT C)"
+burst_mult = input.float(1.3, "Volatility Burst Multiplier", step=0.1, group=grpImpulse)
+rsi_len    = input.int(15, "RSI Confirmation Length", group=grpImpulse)
+rsi_val    = input.int(56, "RSI Threshold (Long/Short)", group=grpImpulse)
+
+grpExit    = "EXIT SETTINGS"
+atr_len    = input.int(2, "ATR Length for Stop", group=grpExit)
+atr_mult   = input.float(4, "ATR Stop Multiplier", group=grpExit)
+
+//====================================================
+// 2) LOGIC
+//====================================================
+trend_ema    = request.security(syminfo.tickerid, tf_trend, ta.ema(close, 200))
+trend_up     = close > trend_ema
+trend_down   = close < trend_ema
+
+atr_val      = ta.atr(atr_len)
+candle_range = high - low
+is_burst     = candle_range > (atr_val * burst_mult)
+
+rsi          = ta.rsi(close, rsi_len)
+
+ny_open1  = timestamp("America/New_York", year, month, dayofmonth, 8, 0)
+ny_close1 = timestamp("America/New_York", year, month, dayofmonth, 12, 0)
+ny_open2  = timestamp("America/New_York", year, month, dayofmonth, 20, 0)
+ny_close2 = timestamp("America/New_York", year, month, dayofmonth, 22, 0)
+is_ny_session = (time >= ny_open1 and time < ny_close1) or (time >= ny_open2 and time < ny_close2)
+
+//====================================================
+// 3) SIGNALS
+//====================================================
+var int lastTradeBar = 0
+barsSinceTrade = bar_index - lastTradeBar
+
+long_signal  = barstate.isconfirmed and is_ny_session and trend_up and is_burst and rsi > rsi_val and strategy.position_size == 0 and barsSinceTrade > 2
+short_signal = barstate.isconfirmed and is_ny_session and trend_down and is_burst and rsi < (100 - rsi_val) and strategy.position_size == 0 and barsSinceTrade > 2
+
+if long_signal or short_signal
+    lastTradeBar := bar_index
+
+sl_dist = atr_val * atr_mult
+sl_dist_dollars = sl_dist * point_val
+pos_qty = sl_dist_dollars >= 1 ? math.max(math.min(math.round(max_risk / sl_dist_dollars, 2), 10), 0.01) : 0.01
+
+f_tick(val) => str.tostring(val, format.mintick)
+f_num(val)  => str.tostring(math.round(val, 2))
+
+//====================================================
+// 4) PRICES
+//====================================================
+long_sl  = close - sl_dist
+long_tp  = close + (sl_dist * rr_target)
+
+short_sl = close + sl_dist
+short_tp = close - (sl_dist * rr_target)
+
+//====================================================
+// 5) EXECUTION
+//====================================================
+if long_signal
+    string alertMsg = '{"event":"entry","side":"long","ticker":"' + syminfo.ticker + '","sl":"' + str.tostring(math.round(long_sl, 2)) + '","tp":"' + str.tostring(math.round(long_tp, 2)) + '","size":"' + str.tostring(pos_qty) + '"}'
+    strategy.entry(
+         "Empire Long",
+         strategy.long,
+         qty=pos_qty,
+         alert_message=alertMsg)
+
+    strategy.exit(
+         "Exit Long",
+         "Empire Long",
+         stop=long_sl,
+         limit=long_tp,
+         alert_message='{"event":"close","side":"long","ticker":"' + syminfo.ticker + '"}')
+
+if short_signal
+    string alertMsg = '{"event":"entry","side":"short","ticker":"' + syminfo.ticker + '","sl":"' + str.tostring(math.round(short_sl, 2)) + '","tp":"' + str.tostring(math.round(short_tp, 2)) + '","size":"' + str.tostring(pos_qty) + '"}'
+    strategy.entry(
+         "Empire Short",
+         strategy.short,
+         qty=pos_qty,
+         alert_message=alertMsg)
+
+    strategy.exit(
+         "Exit Short",
+         "Empire Short",
+         stop=short_sl,
+         limit=short_tp,
+         alert_message='{"event":"close","side":"short","ticker":"' + syminfo.ticker + '"}')
+
+//====================================================
+// 6) VISUALS
+//====================================================
+plot(trend_ema, color=color.new(color.gray, 50))
+bgcolor(is_ny_session ? color.new(color.blue, 90) : na)
+plotshape(long_signal, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(short_signal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
