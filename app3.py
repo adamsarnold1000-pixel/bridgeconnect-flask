@@ -1,5 +1,5 @@
 """
-Empire Signals - Telegram-only signal relay.
+Empire Signals v3 - Telegram-only signal relay.
 
 Decoupled from execution: this service ONLY formats TradingView alerts and
 posts them to Telegram. It does NOT place trades and has no MT5 queue, so it
@@ -21,7 +21,13 @@ Result format controlled by RESULT_MODE env var:
   pct    -> +2.35%  (percentage of entry price)
   pips   -> +50 pips (move / PIP_SIZE, default 0.0001)
   points -> +12.5 pts (raw price difference)
-  dollar -> +$73.45  (move * contracts)
+  dollar -> +$1,000.00  (move * contracts * CONTRACT_SIZE)
+
+CONTRACT_SIZE is the unit multiplier for your instrument:
+  Gold (XAUUSD): 100  (1 lot = 100 oz, so $1 move = $100/lot)
+  Forex majors: 100000 (1 lot = 100k units)
+  NQ futures:   20     ($20 per point per contract)
+  ES futures:   50     ($50 per point per contract)
 """
 
 import json
@@ -48,9 +54,10 @@ CHANNELS = {
 }
 
 DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "True")
-RESULT_MODE = os.environ.get("RESULT_MODE", "pct").lower().strip()
+RESULT_MODE = os.environ.get("RESULT_MODE", "dollar").lower().strip()
 PIP_SIZE = float(os.environ.get("PIP_SIZE", "0.0001"))
 POINT_VALUE = float(os.environ.get("POINT_VALUE", "1"))
+CONTRACT_SIZE = float(os.environ.get("CONTRACT_SIZE", "100"))
 
 # In-memory store of open trades so we can compute WIN/LOSS on close.
 # Keyed by (channel, symbol). Note: if the service restarts between an entry
@@ -119,12 +126,13 @@ def _result_text(side, entry, exit_price, contracts=1.0):
     """Return (emoji_word, detail_string) for a closed trade.
 
     Result format is controlled by the RESULT_MODE env var.
+    Dollar mode uses CONTRACT_SIZE to convert price move to real money.
     """
     if entry is None or exit_price is None:
         return ("CLOSED", "")
     move = (exit_price - entry) if side == "long" else (entry - exit_price)
     win = move >= 0
-    word = "✅ WIN" if win else "❌ LOSS"
+    word = "\u2705 WIN" if win else "\u274c LOSS"
     sign = "+" if move >= 0 else "-"
 
     if RESULT_MODE == "pct":
@@ -136,8 +144,8 @@ def _result_text(side, entry, exit_price, contracts=1.0):
     elif RESULT_MODE == "points":
         pts = move * POINT_VALUE
         detail = f"{sign}{abs(pts):.2f} pts"
-    else:  # dollar (legacy default)
-        dollar = abs(move) * (contracts if contracts else 1.0)
+    else:  # dollar
+        dollar = abs(move) * (contracts if contracts else 1.0) * CONTRACT_SIZE
         detail = f"{sign}${dollar:,.2f}"
 
     return (word, detail)
@@ -159,7 +167,7 @@ def build_message(data, channel):
         tail = f" ({detail})" if detail else ""
         return f"{symbol} {word}{tail}"
 
-    # entry — store side, entry price, and contracts for later close calc
+    # entry -- store side, entry price, and contracts for later close calc
     if s["price"] is not None:
         with _LOCK:
             _OPEN[key] = {
@@ -169,7 +177,7 @@ def build_message(data, channel):
             }
 
     side_lbl = side.upper() if side else "?"
-    lines = [f"🔔 *{symbol} {side_lbl}*"]
+    lines = [f"\U0001f514 *{symbol} {side_lbl}*"]
     if s["price"] is not None:
         lines.append(f"Entry: {_fmt(s['price'])}")
     if s["sl"] not in (None, ""):
@@ -235,7 +243,7 @@ def signal_alias(client_id):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Empire Signals relay running", 200
+    return "Empire Signals v3 relay running", 200
 
 
 @app.route("/health", methods=["GET"])
@@ -243,7 +251,9 @@ def health():
     return jsonify(
         {
             "status": "ok",
+            "version": 3,
             "result_mode": RESULT_MODE,
+            "contract_size": CONTRACT_SIZE,
             "pip_size": PIP_SIZE,
             "point_value": POINT_VALUE,
             "dry_run": DRY_RUN,

@@ -13,7 +13,9 @@ Set these (do NOT hardcode in code):
 | `VIP_CHAT_ID`   | numeric id of the VIP channel          |
 | `REG_BOT_TOKEN` | token of your regular bot              |
 | `REG_CHAT_ID`   | numeric id of the regular channel      |
-| `RESULT_MODE`   | `pct` (default) \| `pips` \| `points`  |
+| `RESULT_MODE`   | `pct` (default) \| `pips` \| `points` \| `dollar` |
+| `PIP_SIZE`      | pip size for pips mode (default `0.0001`, use `0.01` for JPY) |
+| `POINT_VALUE`   | multiplier for points mode (default `1`)  |
 
 The bot for each channel must be an **admin** of that channel.
 
