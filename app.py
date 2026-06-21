@@ -17,7 +17,11 @@ Secrets are read from environment variables (set these in Railway -> Variables):
 Optional:
   DRY_RUN = "1" to log instead of calling Telegram (for local testing)
 
-Result format: raw dollar P&L (move * contracts), e.g. WIN +$73.45
+Result format controlled by RESULT_MODE env var:
+  pct    -> +2.35%  (percentage of entry price)
+  pips   -> +50 pips (move / PIP_SIZE, default 0.0001)
+  points -> +12.5 pts (raw price difference)
+  dollar -> +$73.45  (move * contracts)
 """
 
 import json
@@ -44,6 +48,9 @@ CHANNELS = {
 }
 
 DRY_RUN = os.environ.get("DRY_RUN", "") in ("1", "true", "True")
+RESULT_MODE = os.environ.get("RESULT_MODE", "pct").lower().strip()
+PIP_SIZE = float(os.environ.get("PIP_SIZE", "0.0001"))
+POINT_VALUE = float(os.environ.get("POINT_VALUE", "1"))
 
 # In-memory store of open trades so we can compute WIN/LOSS on close.
 # Keyed by (channel, symbol). Note: if the service restarts between an entry
@@ -109,15 +116,31 @@ def _extract(data):
 
 
 def _result_text(side, entry, exit_price, contracts=1.0):
-    """Return (emoji_word, detail_string) for a closed trade — raw dollar P&L."""
+    """Return (emoji_word, detail_string) for a closed trade.
+
+    Result format is controlled by the RESULT_MODE env var.
+    """
     if entry is None or exit_price is None:
         return ("CLOSED", "")
     move = (exit_price - entry) if side == "long" else (entry - exit_price)
     win = move >= 0
     word = "✅ WIN" if win else "❌ LOSS"
     sign = "+" if move >= 0 else "-"
-    dollar = abs(move) * (contracts if contracts else 1.0)
-    return (word, f"{sign}${dollar:,.2f}")
+
+    if RESULT_MODE == "pct":
+        pct = (move / entry) * 100 if entry != 0 else 0.0
+        detail = f"{sign}{abs(pct):.2f}%"
+    elif RESULT_MODE == "pips":
+        pips = move / PIP_SIZE
+        detail = f"{sign}{abs(pips):.1f} pips"
+    elif RESULT_MODE == "points":
+        pts = move * POINT_VALUE
+        detail = f"{sign}{abs(pts):.2f} pts"
+    else:  # dollar (legacy default)
+        dollar = abs(move) * (contracts if contracts else 1.0)
+        detail = f"{sign}${dollar:,.2f}"
+
+    return (word, detail)
 
 
 def build_message(data, channel):
@@ -133,7 +156,7 @@ def build_message(data, channel):
         rside = rec["side"] if rec else side
         contracts = rec.get("contracts", 1.0) if rec else 1.0
         word, detail = _result_text(rside, entry, s["price"], contracts)
-        tail = f" {detail}" if detail else ""
+        tail = f" ({detail})" if detail else ""
         return f"{symbol} {word}{tail}"
 
     # entry — store side, entry price, and contracts for later close calc
@@ -220,7 +243,9 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "result_mode": "dollar",
+            "result_mode": RESULT_MODE,
+            "pip_size": PIP_SIZE,
+            "point_value": POINT_VALUE,
             "dry_run": DRY_RUN,
             "open_trades": len(_OPEN),
             "channels_configured": {
